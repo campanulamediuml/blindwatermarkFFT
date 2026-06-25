@@ -11,10 +11,10 @@
 import time
 import threading
 import uuid
-import concurrent.futures
 from typing import Dict, List, Optional
 
 from server.compute_slot import ComputeSlot
+from server.daemon_executor import create_daemon_executor
 
 
 class SessionStore:
@@ -39,7 +39,7 @@ class SessionStore:
         self._max_workers = max_workers
         self._sessions: Dict[str, dict] = {}
         self._lock = threading.Lock()
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self._executor = create_daemon_executor(max_workers=max_workers)
 
     def create(
         self,
@@ -176,6 +176,24 @@ class SessionStore:
             for session_id in expired:
                 del self._sessions[session_id]
         return len(expired)
+
+    def close_all_sessions(self):
+        """关闭所有会话的处理器资源。用于服务优雅退出。"""
+        with self._lock:
+            for session in self._sessions.values():
+                try:
+                    session["processor"].close()
+                except Exception:
+                    pass
+            self._sessions.clear()
+
+    def shutdown(self):
+        """关闭会话存储，释放所有资源。"""
+        self.close_all_sessions()
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
 
     def stats(self) -> dict:
         """返回当前会话统计。"""

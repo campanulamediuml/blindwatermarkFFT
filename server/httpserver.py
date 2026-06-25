@@ -794,13 +794,27 @@ def main():
 
     io_loop = tornado.ioloop.IOLoop.current()
 
+    cleanup_callback = None
+    memory_callback = None
+
     def shutdown(signum, frame):
-        """收到 SIGINT/SIGTERM 后优雅退出。"""
+        """收到 SIGINT/SIGTERM 后强制退出。"""
         print("\nReceived shutdown signal, stopping server...")
+        # 停止定时器
+        if cleanup_callback:
+            cleanup_callback.stop()
+        if memory_callback:
+            memory_callback.stop()
         # 停止接收新连接
         server.stop()
         # 在 IOLoop 中调度停止事件循环
         io_loop.add_callback_from_signal(io_loop.stop)
+        # 兜底：0.5 秒后如果进程还没退出，直接强制退出
+        # 所有后台计算线程都是 daemon，主线程结束即终止
+        def _force_exit():
+            print("Force exiting...")
+            os._exit(0)
+        io_loop.call_later(0.5, _force_exit)
 
     # 注册信号处理函数
     signal.signal(signal.SIGINT, shutdown)
@@ -811,7 +825,7 @@ def main():
         count = session_store.cleanup()
         if count:
             print(f"[SessionStore] cleaned up {count} expired sessions")
-    cleanup_callback = tornado.ioloop.PeriodicCallback(_cleanup_sessions, 1000)
+    cleanup_callback = tornado.ioloop.PeriodicCallback(_cleanup_sessions, 600000)
     cleanup_callback.start()
 
     # 启动内存监控定时器（每 10 秒打印一次当前进程内存占用，单位 MB）
@@ -824,7 +838,7 @@ def main():
             f"VMS {mem.vms / 1024 / 1024:.2f} MB"
         )
 
-    memory_callback = tornado.ioloop.PeriodicCallback(_log_memory, 6000)
+    memory_callback = tornado.ioloop.PeriodicCallback(_log_memory, 10000)
     memory_callback.start()
 
     print(f"FFT Watermark server is running at http://localhost:{args.port}/")

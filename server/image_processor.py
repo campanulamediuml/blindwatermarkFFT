@@ -7,9 +7,10 @@
 import base64
 import io
 import time
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Dict, Optional, Tuple
+
+from server.daemon_executor import create_daemon_executor
 
 import numpy as np
 from PIL import Image
@@ -309,8 +310,8 @@ class FFTWatermarkProcessor:
         # mask 缓存：按 (scale, freq) 缓存构建好的水印掩膜
         self._mask_cache: Dict[Tuple[float, float], np.ndarray] = {}
 
-        # 线程池：用于并行处理 R/G/B 三个通道
-        self._executor = ThreadPoolExecutor(max_workers=3)
+        # 线程池：用于并行处理 R/G/B 三个通道（daemon，确保 Ctrl+C 可退出）
+        self._executor = create_daemon_executor(max_workers=3)
 
     def set_watermark(self, watermark_bytes: bytes):
         """
