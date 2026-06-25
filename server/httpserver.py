@@ -581,7 +581,7 @@ def make_app() -> tornado.web.Application:
     )
 
 
-def main(port: int = 30311):
+def main(port):
     """启动 HTTP 服务。"""
     app = make_app()
 
@@ -618,4 +618,4 @@ def main(port: int = 30311):
 
 
 if __name__ == "__main__":
-    main()
+    main(30312)
