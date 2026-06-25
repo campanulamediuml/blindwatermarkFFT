@@ -18,10 +18,13 @@
     let fileA = null;
     let fileB = null;
     let sessionId = null;   // 服务端会话 ID
+    let hasWatermark = false; // 当前 session 是否已设置水印
     let currentScale = 50;  // 水印比例 0~100
     let currentPower = 5;   // 强度 1~10
     let currentFreq = 10;   // 水印频率 0~10，10 为边缘，0 为中心
     let analyzeResult = null; // 缓存 analyze 结果
+    let sessions = [];      // 任务列表
+    let isTaskPanelOpen = false;
 
     // ==================== DOM 元素 ====================
     const dropZoneA = document.getElementById('drop-zone-a');
@@ -49,6 +52,11 @@
     const previewSignLoading = document.getElementById('preview-sign-loading');
     const gridLoading = document.getElementById('grid-loading');
     const gridTable = document.querySelector('.spectrum-grid');
+
+    // 任务面板 DOM
+    const taskPanelToggle = document.getElementById('task-panel-toggle');
+    const taskPanel = document.getElementById('task-panel');
+    const taskList = document.getElementById('task-list');
 
     // 图片放大模态框
     const imageModal = document.getElementById('image-modal');
@@ -194,7 +202,8 @@
      * 更新按钮状态。
      */
     function updateControls() {
-        signBtn.disabled = !(fileA && fileB);
+        const canSign = (fileA && fileB) || (sessionId && hasWatermark);
+        signBtn.disabled = !canSign;
     }
 
     /**
@@ -262,6 +271,7 @@
         // 上传新的 A 时，清空之前的会话、签名结果、签名预览和频域叠加效果
         sessionId = null;
         fileB = null;
+        hasWatermark = false;
         fileNameB.textContent = '未选择文件';
         clearResult();
         clearPreviewSign();
@@ -298,6 +308,19 @@
                 hideGridLoading();
                 fillGrid(result.analyze);
 
+                // 标记是否已含水印
+                hasWatermark = !!result.thumbnail_signed;
+
+                // 加入任务列表并刷新面板
+                sessions.unshift({
+                    session_id: sessionId,
+                    thumbnail_original: result.thumbnail_original,
+                    thumbnail_signed: result.thumbnail_signed,
+                    params: { scale: currentScale, power: currentPower, freq: currentFreq },
+                    image_info: file.name,
+                    watermark_info: hasWatermark ? '已上传' : '',
+                });
+                renderTaskList();
                 updateControls();
             })
             .catch(err => {
@@ -335,6 +358,11 @@
                 if (result.error) {
                     throw new Error(result.error);
                 }
+                hasWatermark = true;
+                updateCurrentTaskItem({
+                    thumbnail_signed: result.thumbnail_signed,
+                    watermark_info: file.name,
+                });
                 previewWatermark();
                 previewSignedImage();
                 updateControls();
@@ -349,7 +377,7 @@
      * 调用 /api/session/preview 预览水印叠加效果。
      */
     function previewWatermark() {
-        if (!sessionId || !fileB) return;
+        if (!sessionId || !hasWatermark) return;
 
         console.log(`[previewWatermark] scale=${currentScale}, power=${currentPower}, freq=${currentFreq}`);
 
@@ -401,13 +429,25 @@
     }
 
     /**
+     * 将 Blob 转为 data URL。
+     */
+    function blobToDataURL(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    /**
      * 调用 /api/session/preview_sign 实时预览签名后的图像。
      */
     function previewSignedImage() {
         if (!sessionId) return;
 
         // 如果没有水印 B，签名预览就是原图本身
-        if (!fileB) {
+        if (!hasWatermark) {
             if (analyzeResult) {
                 updatePreviewSign(analyzeResult.original);
             }
@@ -437,7 +477,15 @@
             .then(response => response.blob())
             .then(blob => {
                 console.log('[previewSignedImage] response received');
-                updatePreviewSign(URL.createObjectURL(blob));
+                const objectUrl = URL.createObjectURL(blob);
+                updatePreviewSign(objectUrl);
+                return blobToDataURL(blob);
+            })
+            .then(dataUrl => {
+                updateCurrentTaskItem({
+                    thumbnail_signed: dataUrl,
+                    params: { scale: currentScale, power: currentPower, freq: currentFreq },
+                });
             })
             .catch(err => {
                 if (err.name === 'AbortError') {
@@ -456,7 +504,7 @@
      * 调用 /api/session/sign 生成带水印图像。
      */
     function signImage() {
-        if (!sessionId || !fileB) return;
+        if (!sessionId || !hasWatermark) return;
 
         signBtn.disabled = true;
         signBtn.textContent = '处理中...';
@@ -493,6 +541,226 @@
             });
     }
 
+    // ==================== 任务面板管理 ====================
+
+    /**
+     * 切换任务面板显示/隐藏。
+     */
+    function toggleTaskPanel() {
+        isTaskPanelOpen = !isTaskPanelOpen;
+        taskPanel.classList.toggle('active', isTaskPanelOpen);
+        if (isTaskPanelOpen) {
+            loadTaskList();
+        }
+    }
+
+    /**
+     * 从后端加载任务列表。
+     */
+    function loadTaskList() {
+        fetch('/api/session/list')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('获取任务列表失败');
+                }
+                return response.json();
+            })
+            .then(result => {
+                sessions = result.sessions || [];
+                renderTaskList();
+            })
+            .catch(err => {
+                console.error(err);
+            });
+    }
+
+    /**
+     * 更新当前任务在本地列表中的数据。
+     */
+    function updateCurrentTaskItem(updates) {
+        if (!sessionId) return;
+        const idx = sessions.findIndex(s => s.session_id === sessionId);
+        if (idx >= 0) {
+            sessions[idx] = { ...sessions[idx], ...updates };
+            renderTaskList();
+        }
+    }
+
+    /**
+     * 渲染任务列表面板。
+     */
+    function renderTaskList() {
+        if (!sessions.length) {
+            taskList.innerHTML = '<div class="task-empty">暂无任务</div>';
+            return;
+        }
+
+        taskList.innerHTML = '';
+        sessions.forEach(session => {
+            const isCurrent = session.session_id === sessionId;
+            const item = document.createElement('div');
+            item.className = 'task-item' + (isCurrent ? ' current' : '');
+            item.dataset.sessionId = session.session_id;
+
+            const originalThumb = session.thumbnail_original || '';
+            const signedThumb = session.thumbnail_signed || '';
+
+            const scale = session.params ? session.params.scale : 50;
+            const power = session.params ? session.params.power : 5;
+            const freq = session.params ? session.params.freq : 10;
+
+            item.innerHTML = `
+                <div class="task-thumbs">
+                    <img src="${originalThumb}" alt="原图" title="原图">
+                    <img src="${signedThumb || originalThumb}" alt="签名" title="签名预览">
+                </div>
+                <div class="task-info">
+                    <div>比例${scale}% · 强度${power} · 频率${freq}</div>
+                    <div class="task-params">${session.watermark_info ? '水印：' + escapeHtml(session.watermark_info) : '无水印'}</div>
+                </div>
+                <div class="task-delete ${isCurrent ? 'disabled' : ''}" title="${isCurrent ? '当前任务不可删除' : '删除任务'}">×</div>
+            `;
+
+            // 点击整行切换任务
+            item.addEventListener('click', (e) => {
+                if (e.target.classList.contains('task-delete')) return;
+                switchTask(session.session_id);
+            });
+
+            // 点击删除按钮
+            const deleteBtn = item.querySelector('.task-delete');
+            if (!isCurrent) {
+                deleteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteTask(session.session_id);
+                });
+            }
+
+            taskList.appendChild(item);
+        });
+    }
+
+    /**
+     * HTML 转义，防止任务信息中的特殊字符破坏界面。
+     */
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    /**
+     * 切换到指定任务。
+     */
+    function switchTask(targetSessionId) {
+        if (targetSessionId === sessionId) return;
+
+        fetch(`/api/session/info?session_id=${encodeURIComponent(targetSessionId)}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('获取任务信息失败');
+                }
+                return response.json();
+            })
+            .then(result => {
+                if (result.error) {
+                    throw new Error(result.error);
+                }
+
+                // 恢复 session 状态
+                sessionId = result.session_id;
+                analyzeResult = result.analyze;
+                hasWatermark = !!result.thumbnail_signed || (result.watermark_info && result.watermark_info !== '');
+
+                // 恢复参数
+                const params = result.params || { scale: 50, power: 5, freq: 10 };
+                currentScale = params.scale;
+                currentPower = params.power;
+                currentFreq = params.freq;
+
+                scaleSlider.value = currentScale;
+                scaleValue.textContent = currentScale;
+                powerSlider.value = currentPower;
+                powerValue.textContent = currentPower;
+                freqSlider.value = currentFreq;
+                freqValue.textContent = currentFreq;
+
+                // 恢复文件名显示
+                fileA = null;
+                fileB = null;
+                fileNameA.textContent = result.image_info ? extractFileName(result.image_info) : '已加载任务';
+                fileNameB.textContent = result.watermark_info ? extractFileName(result.watermark_info) : '未选择文件';
+
+                // 清空签名结果区域
+                clearResult();
+
+                // 恢复 3×3 表格
+                hideGridLoading();
+                gridTable.style.display = '';
+                fillGrid(result.analyze);
+
+                // 恢复预览区域
+                originalPlaceholder.style.display = 'none';
+                showImage(originalPreview, result.analyze.original);
+
+                if (hasWatermark && result.thumbnail_signed) {
+                    updatePreviewSign(result.thumbnail_signed);
+                } else {
+                    updatePreviewSign(result.analyze.original);
+                }
+
+                updateControls();
+                renderTaskList();
+
+                // 如果含水印，重新请求一次当前参数的 preview 和 preview_sign，确保界面最新
+                if (hasWatermark) {
+                    previewWatermark();
+                    previewSignedImage();
+                }
+            })
+            .catch(err => {
+                alert('切换任务失败：' + err.message);
+                console.error(err);
+            });
+    }
+
+    /**
+     * 从 "filename(bytes)" 中提取文件名。
+     */
+    function extractFileName(info) {
+        if (!info) return '';
+        const match = info.match(/^(.+)\(\d+\s*bytes\)$/);
+        return match ? match[1] : info;
+    }
+
+    /**
+     * 删除指定任务。
+     */
+    function deleteTask(targetSessionId) {
+        if (targetSessionId === sessionId) {
+            alert('不能删除当前正在使用的任务');
+            return;
+        }
+        if (!confirm('确定要删除这个任务吗？')) return;
+
+        const formData = new FormData();
+        formData.append('session_id', targetSessionId);
+
+        postFile('/api/session/delete', formData, null, true)
+            .then(result => {
+                if (result.error) {
+                    throw new Error(result.error);
+                }
+                sessions = sessions.filter(s => s.session_id !== targetSessionId);
+                renderTaskList();
+            })
+            .catch(err => {
+                alert('删除任务失败：' + err.message);
+                console.error(err);
+            });
+    }
+
     // ==================== 事件绑定 ====================
 
     setupDragZone(dropZoneA, handleImageA);
@@ -512,13 +780,13 @@
 
     // 滑动条拖动时实时预览幅度谱（fft 叠图快），松开鼠标后才预览签名（ifft 较慢）
     function onPreviewControlChanged() {
-        if (sessionId && fileB) {
+        if (sessionId && hasWatermark) {
             previewWatermark();
         }
     }
 
     function onSignControlChanged() {
-        if (sessionId && fileB) {
+        if (sessionId && hasWatermark) {
             previewSignedImage();
         }
     }
@@ -560,6 +828,19 @@
     });
 
     signBtn.addEventListener('click', signImage);
+
+    // 任务面板按钮
+    taskPanelToggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleTaskPanel();
+    });
+
+    // 点击页面其他地方关闭任务面板
+    document.addEventListener('click', (e) => {
+        if (isTaskPanelOpen && !taskPanel.contains(e.target) && e.target !== taskPanelToggle) {
+            toggleTaskPanel();
+        }
+    });
 
     // ==================== 图片放大查看 ====================
 
@@ -612,4 +893,5 @@
     // 初始化
     bindZoomEvents();
     updateControls();
+    loadTaskList();
 })();

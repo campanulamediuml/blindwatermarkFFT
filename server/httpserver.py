@@ -23,7 +23,7 @@ import tornado.web
 import tornado.httpserver
 from tornado.log import enable_pretty_logging
 
-from server.image_processor import FFTWatermarkProcessor
+from server.image_processor import FFTWatermarkProcessor, _make_thumbnail
 from server.logger import AppLogger
 from server.session_store import SessionStore
 
@@ -334,8 +334,33 @@ class SessionUploadHandler(tornado.web.RequestHandler):
                 processor.set_watermark(watermark_bytes)
                 watermark_info = file_info.get("watermark", "")
 
-            session_id = session_store.create(processor, analyze_result, watermark_info)
-            result = {"session_id": session_id, "analyze": analyze_result}
+            # 生成原图缩略图，用于任务列表展示
+            thumbnail_original = _make_thumbnail(image_bytes, max_size=120)
+
+            image_info = file_info.get("image", "")
+            session_id = session_store.create(
+                processor,
+                analyze_result,
+                image_info=image_info,
+                watermark_info=watermark_info,
+                thumbnail_original=thumbnail_original,
+            )
+
+            # 如果有水印，生成默认参数的签名预览缩略图
+            thumbnail_signed = None
+            if watermark_files:
+                sign_bytes = processor.sign(
+                    scale_frontend=50, power_frontend=5, freq_frontend=10
+                )
+                thumbnail_signed = _make_thumbnail(sign_bytes, max_size=120)
+                session_store.update_thumbnail_signed(session_id, thumbnail_signed)
+
+            result = {
+                "session_id": session_id,
+                "analyze": analyze_result,
+                "thumbnail_original": thumbnail_original,
+                "thumbnail_signed": thumbnail_signed,
+            }
 
             self.set_header("Content-Type", "application/json; charset=utf-8")
             self.write(json.dumps(result))
@@ -384,8 +409,15 @@ class SessionWatermarkHandler(tornado.web.RequestHandler):
             processor.set_watermark(watermark_bytes)
             session["watermark_info"] = file_info["watermark"]
 
+            # 生成默认参数的签名预览缩略图
+            sign_bytes = processor.sign(
+                scale_frontend=50, power_frontend=5, freq_frontend=10
+            )
+            thumbnail_signed = _make_thumbnail(sign_bytes, max_size=120)
+            session_store.update_thumbnail_signed(session_id, thumbnail_signed)
+
             self.set_header("Content-Type", "application/json; charset=utf-8")
-            self.write(json.dumps({"success": True}))
+            self.write(json.dumps({"success": True, "thumbnail_signed": thumbnail_signed}))
         except Exception as e:
             status = 400
             error_msg = str(e)
@@ -436,6 +468,13 @@ class SessionPreviewHandler(tornado.web.RequestHandler):
                 )
 
             parts = await session["preview_slot"].call(args, compute)
+
+            # 缓存当前参数
+            try:
+                session_store.update_params(session_id, args)
+            except Exception:
+                pass
+
             parts = {
                 "amplitude_r": parts["r"],
                 "amplitude_g": parts["g"],
@@ -495,6 +534,15 @@ class SessionPreviewSignHandler(tornado.web.RequestHandler):
 
             result_bytes = await session["preview_sign_slot"].call(args, compute)
 
+            # 缓存签名预览缩略图和当前参数
+            try:
+                thumbnail_signed = _make_thumbnail(result_bytes, max_size=120)
+                session_store.update_thumbnail_signed(session_id, thumbnail_signed)
+                session_store.update_params(session_id, args)
+            except Exception:
+                # 缩略图生成失败不影响主流程
+                pass
+
             self.set_header("Content-Type", "image/png")
             self.write(result_bytes)
         except Exception as e:
@@ -507,6 +555,120 @@ class SessionPreviewSignHandler(tornado.web.RequestHandler):
             elapsed_ms = (time.time() - start) * 1000
             logger.log_request(
                 url="/api/session/preview_sign",
+                method="POST",
+                status_code=status,
+                elapsed_ms=elapsed_ms,
+                args=args,
+                error=error_msg,
+            )
+
+
+class SessionListHandler(tornado.web.RequestHandler):
+    """GET /api/session/list：列出所有会话摘要。"""
+
+    def get(self):
+        logger = AppLogger()
+        start = time.time()
+        status = 200
+        error_msg = None
+
+        try:
+            sessions = session_store.list()
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+            self.write(json.dumps({"sessions": sessions}))
+        except Exception as e:
+            status = 400
+            error_msg = str(e)
+            self.set_status(status)
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+            self.write(json.dumps({"error": error_msg}))
+        finally:
+            elapsed_ms = (time.time() - start) * 1000
+            logger.log_request(
+                url="/api/session/list",
+                method="GET",
+                status_code=status,
+                elapsed_ms=elapsed_ms,
+                error=error_msg,
+            )
+
+
+class SessionInfoHandler(tornado.web.RequestHandler):
+    """GET /api/session/info?session_id=xxx：获取指定会话的完整状态，用于切换任务。"""
+
+    def get(self):
+        logger = AppLogger()
+        start = time.time()
+        status = 200
+        error_msg = None
+        args = {}
+
+        try:
+            session_id = self.get_argument("session_id", "")
+            args = {"session_id": session_id}
+            session = session_store.get(session_id)
+            if session is None:
+                raise ValueError("会话不存在或已过期")
+
+            result = {
+                "session_id": session_id,
+                "analyze": session["analyze_result"],
+                "thumbnail_original": session.get("thumbnail_original"),
+                "thumbnail_signed": session.get("thumbnail_signed"),
+                "image_info": session.get("image_info", {}),
+                "watermark_info": session.get("watermark_info", {}),
+                "params": session.get("params", {"scale": 50, "power": 5, "freq": 10}),
+            }
+
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+            self.write(json.dumps(result))
+        except Exception as e:
+            status = 400
+            error_msg = str(e)
+            self.set_status(status)
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+            self.write(json.dumps({"error": error_msg}))
+        finally:
+            elapsed_ms = (time.time() - start) * 1000
+            logger.log_request(
+                url="/api/session/info",
+                method="GET",
+                status_code=status,
+                elapsed_ms=elapsed_ms,
+                args=args,
+                error=error_msg,
+            )
+
+
+class SessionDeleteHandler(tornado.web.RequestHandler):
+    """POST /api/session/delete：删除指定会话。"""
+
+    def post(self):
+        logger = AppLogger()
+        start = time.time()
+        status = 200
+        error_msg = None
+        args = {}
+
+        try:
+            session_id = self.get_body_argument("session_id", "")
+            args = {"session_id": session_id}
+            success = session_store.delete(session_id)
+            if not success:
+                raise ValueError("会话不存在或已过期")
+
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+            self.write(json.dumps({"success": True}))
+        except Exception as e:
+            status = 400
+            error_msg = str(e)
+            self.set_status(status)
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+            self.write(json.dumps({"error": error_msg}))
+        finally:
+            elapsed_ms = (time.time() - start) * 1000
+            logger.log_request(
+                url="/api/session/delete",
                 method="POST",
                 status_code=status,
                 elapsed_ms=elapsed_ms,
@@ -542,6 +704,14 @@ class SessionSignHandler(tornado.web.RequestHandler):
                 power_frontend=power_frontend,
                 freq_frontend=freq_frontend,
             )
+
+            # 缓存签名缩略图和当前参数
+            try:
+                thumbnail_signed = _make_thumbnail(result_bytes, max_size=120)
+                session_store.update_thumbnail_signed(session_id, thumbnail_signed)
+                session_store.update_params(session_id, args)
+            except Exception:
+                pass
 
             self.set_header("Content-Type", "image/png")
             self.set_header("Content-Disposition", "attachment; filename=signed.png")
@@ -579,6 +749,10 @@ def make_app() -> tornado.web.Application:
             (r"/api/session/preview", SessionPreviewHandler),
             (r"/api/session/preview_sign", SessionPreviewSignHandler),
             (r"/api/session/sign", SessionSignHandler),
+            # 多任务管理接口
+            (r"/api/session/list", SessionListHandler),
+            (r"/api/session/info", SessionInfoHandler),
+            (r"/api/session/delete", SessionDeleteHandler),
             (r"/static/(.*)", StaticFileHandler),
         ],
         static_path=None,  # 我们自己处理静态文件
@@ -637,7 +811,7 @@ def main():
         count = session_store.cleanup()
         if count:
             print(f"[SessionStore] cleaned up {count} expired sessions")
-    cleanup_callback = tornado.ioloop.PeriodicCallback(_cleanup_sessions, 600000)
+    cleanup_callback = tornado.ioloop.PeriodicCallback(_cleanup_sessions, 1000)
     cleanup_callback.start()
 
     # 启动内存监控定时器（每 10 秒打印一次当前进程内存占用，单位 MB）
@@ -650,7 +824,7 @@ def main():
             f"VMS {mem.vms / 1024 / 1024:.2f} MB"
         )
 
-    memory_callback = tornado.ioloop.PeriodicCallback(_log_memory, 10000)
+    memory_callback = tornado.ioloop.PeriodicCallback(_log_memory, 6000)
     memory_callback.start()
 
     print(f"FFT Watermark server is running at http://localhost:{args.port}/")

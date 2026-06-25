@@ -89,6 +89,15 @@ def _to_data_url(png_bytes: bytes) -> str:
     return f"data:image/png;base64,{b64}"
 
 
+def _make_thumbnail(image_bytes: bytes, max_size: int = 120) -> str:
+    """从 PNG/JPG 字节流生成缩略图 data URL。"""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG", compress_level=6)
+    return _to_data_url(buffer.getvalue())
+
+
 def _normalize_for_display(arr: np.ndarray) -> np.ndarray:
     """
     将任意范围的浮点数组归一化到 0~255 的 uint8，用于展示。
