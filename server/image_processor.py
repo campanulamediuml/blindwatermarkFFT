@@ -6,11 +6,24 @@
 
 import base64
 import io
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 from PIL import Image
+
+
+@contextmanager
+def _timed(label: str):
+    """简单的耗时上下文管理器，用于打印 CPU 密集型计算耗时。"""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        print(f"[TIMING] {label}: {elapsed_ms:.2f} ms")
 
 
 # ==================== 可配置常量 ====================
@@ -127,10 +140,11 @@ def _fft_channel(channel: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarra
         amplitude: 幅度谱（已 shift，中心为 0）
         phase: 相位谱（已 shift）
     """
-    f = np.fft.fft2(channel)
-    fshift = np.fft.fftshift(f)
-    amplitude = np.abs(fshift)
-    phase = np.angle(fshift)
+    with _timed("fft_channel"):
+        f = np.fft.fft2(channel)
+        fshift = np.fft.fftshift(f)
+        amplitude = np.abs(fshift)
+        phase = np.angle(fshift)
     return fshift, amplitude, phase
 
 
@@ -150,6 +164,15 @@ def _binarize_watermark(watermark_gray: np.ndarray) -> np.ndarray:
 
 
 def _build_watermark_mask(
+    watermark_binary: np.ndarray,
+    target_shape: Tuple[int, int],
+    freq_frontend: float = DEFAULT_FREQ_FRONTEND,
+) -> np.ndarray:
+    with _timed("build_watermark_mask"):
+        return _build_watermark_mask_impl(watermark_binary, target_shape, freq_frontend)
+
+
+def _build_watermark_mask_impl(
     watermark_binary: np.ndarray,
     target_shape: Tuple[int, int],
     freq_frontend: float = DEFAULT_FREQ_FRONTEND,
@@ -258,16 +281,17 @@ class FFTWatermarkProcessor:
         self._amp_log_channels = []
         self._amp_log_ranges = []  # 每个通道 (amin, amax)
 
-        for c in range(3):
-            channel = self.arr[:, :, c].astype(np.float64)
-            fshift, amplitude, phase = _fft_channel(channel)
-            self._fshift_channels.append(fshift)
-            self._amplitude_channels.append(amplitude)
-            self._phase_channels.append(phase)
+        with _timed("processor_init_fft_all_channels"):
+            for c in range(3):
+                channel = self.arr[:, :, c].astype(np.float64)
+                fshift, amplitude, phase = _fft_channel(channel)
+                self._fshift_channels.append(fshift)
+                self._amplitude_channels.append(amplitude)
+                self._phase_channels.append(phase)
 
-            amp_log = np.log1p(amplitude)
-            self._amp_log_channels.append(amp_log)
-            self._amp_log_ranges.append((amp_log.min(), amp_log.max()))
+                amp_log = np.log1p(amplitude)
+                self._amp_log_channels.append(amp_log)
+                self._amp_log_ranges.append((amp_log.min(), amp_log.max()))
 
         # 水印缓存：B 上传后缓存 bytes，并按 scale 缓存二值化结果
         self._watermark_bytes: Optional[bytes] = None
@@ -302,29 +326,31 @@ class FFTWatermarkProcessor:
 
     def _preview_channel(self, c: int, mask: np.ndarray, power: float) -> np.ndarray:
         """计算单个通道叠加水印后的幅度谱显示数组。"""
-        amplitude_orig = self._amplitude_channels[c]
-        amplitude_masked = np.maximum(amplitude_orig, WATERMARK_AMPLITUDE_FLOOR) * power
-        amplitude_new = amplitude_orig * (1.0 - mask) + amplitude_masked * mask
+        with _timed(f"preview_channel_{['r','g','b'][c]}"):
+            amplitude_orig = self._amplitude_channels[c]
+            amplitude_masked = np.maximum(amplitude_orig, WATERMARK_AMPLITUDE_FLOOR) * power
+            amplitude_new = amplitude_orig * (1.0 - mask) + amplitude_masked * mask
 
-        amp_log = np.log1p(amplitude_new)
-        amin, amax = self._amp_log_ranges[c]
-        return _normalize_with_range(amp_log, amin, amax)
+            amp_log = np.log1p(amplitude_new)
+            amin, amax = self._amp_log_ranges[c]
+            return _normalize_with_range(amp_log, amin, amax)
 
     def _sign_channel(self, c: int, mask: np.ndarray, power: float) -> np.ndarray:
         """计算单个通道签名后的空域图像。"""
-        amplitude_orig = self._amplitude_channels[c]
-        amplitude_masked = np.maximum(amplitude_orig, WATERMARK_AMPLITUDE_FLOOR) * power
-        amplitude_new = amplitude_orig * (1.0 - mask) + amplitude_masked * mask
+        with _timed(f"sign_channel_{['r','g','b'][c]}"):
+            amplitude_orig = self._amplitude_channels[c]
+            amplitude_masked = np.maximum(amplitude_orig, WATERMARK_AMPLITUDE_FLOOR) * power
+            amplitude_new = amplitude_orig * (1.0 - mask) + amplitude_masked * mask
 
-        # 用新幅度谱和原相位谱重建复数频谱
-        fshift_new = amplitude_new * np.exp(1j * self._phase_channels[c])
+            # 用新幅度谱和原相位谱重建复数频谱
+            fshift_new = amplitude_new * np.exp(1j * self._phase_channels[c])
 
-        # 逆变换回空域
-        f_new = np.fft.ifftshift(fshift_new)
-        channel_new = np.real(np.fft.ifft2(f_new))
+            # 逆变换回空域
+            f_new = np.fft.ifftshift(fshift_new)
+            channel_new = np.real(np.fft.ifft2(f_new))
 
-        # 裁剪并转为 uint8
-        return np.clip(channel_new, 0, 255).astype(np.uint8)
+            # 裁剪并转为 uint8
+            return np.clip(channel_new, 0, 255).astype(np.uint8)
 
     def _get_watermark_binary(self, scale_frontend: float) -> np.ndarray:
         """获取指定 scale 下的二值化水印，内部做缓存。"""
@@ -358,21 +384,22 @@ class FFTWatermarkProcessor:
         }
 
         colors = ["r", "g", "b"]
-        for c, color in enumerate(colors):
-            # 空域：单通道按 R/G/B 着色显示
-            spatial_colored = _colorize_channel(self.arr[:, :, c], color)
-            spatial_png = _array_to_png_bytes(spatial_colored)
-            result["spatial"][color] = _to_data_url(spatial_png)
+        with _timed("analyze_encode_all_channels"):
+            for c, color in enumerate(colors):
+                # 空域：单通道按 R/G/B 着色显示
+                spatial_colored = _colorize_channel(self.arr[:, :, c], color)
+                spatial_png = _array_to_png_bytes(spatial_colored)
+                result["spatial"][color] = _to_data_url(spatial_png)
 
-            # 频域幅度谱：对数变换后，用原始幅度谱的 min/max 归一化显示
-            amp_log = self._amp_log_channels[c]
-            amin, amax = self._amp_log_ranges[c]
-            amp_png = _array_to_png_bytes(_normalize_with_range(amp_log, amin, amax))
-            result["amplitude"][color] = _to_data_url(amp_png)
+                # 频域幅度谱：对数变换后，用原始幅度谱的 min/max 归一化显示
+                amp_log = self._amp_log_channels[c]
+                amin, amax = self._amp_log_ranges[c]
+                amp_png = _array_to_png_bytes(_normalize_with_range(amp_log, amin, amax))
+                result["amplitude"][color] = _to_data_url(amp_png)
 
-            # 相位谱：归一化到 0~255 显示（相位谱本来就是灰度图）
-            phase_png = _array_to_png_bytes(_normalize_for_display(self._phase_channels[c]))
-            result["phase"][color] = _to_data_url(phase_png)
+                # 相位谱：归一化到 0~255 显示（相位谱本来就是灰度图）
+                phase_png = _array_to_png_bytes(_normalize_for_display(self._phase_channels[c]))
+                result["phase"][color] = _to_data_url(phase_png)
 
         return result
 
@@ -386,36 +413,37 @@ class FFTWatermarkProcessor:
             - scale_frontend = 100 时，B 的长边 = A 短边的 1/2
             - 始终保持 B 的原始长宽比不变
         """
-        wm = Image.open(io.BytesIO(watermark_bytes)).convert("L")
+        with _timed("prepare_watermark"):
+            wm = Image.open(io.BytesIO(watermark_bytes)).convert("L")
 
-        scale_ratio = _frontend_scale_to_ratio(scale_frontend)
-        if scale_ratio <= 0:
-            # 0% 时不显示水印，返回 1×1 零矩阵
-            return np.zeros((1, 1), dtype=np.float64)
+            scale_ratio = _frontend_scale_to_ratio(scale_frontend)
+            if scale_ratio <= 0:
+                # 0% 时不显示水印，返回 1×1 零矩阵
+                return np.zeros((1, 1), dtype=np.float64)
 
-        # A 的短边
-        a_short = min(self.width, self.height)
-        target_long = int(round(a_short * scale_ratio))
-        target_long = max(1, target_long)
+            # A 的短边
+            a_short = min(self.width, self.height)
+            target_long = int(round(a_short * scale_ratio))
+            target_long = max(1, target_long)
 
-        # B 的原始尺寸和长边
-        b_w, b_h = wm.size
-        b_long = max(b_w, b_h)
-        if b_long == 0:
-            b_long = 1
+            # B 的原始尺寸和长边
+            b_w, b_h = wm.size
+            b_long = max(b_w, b_h)
+            if b_long == 0:
+                b_long = 1
 
-        # 按长边比例缩放，保持宽高比
-        scale = target_long / b_long
-        new_w = max(1, int(round(b_w * scale)))
-        new_h = max(1, int(round(b_h * scale)))
+            # 按长边比例缩放，保持宽高比
+            scale = target_long / b_long
+            new_w = max(1, int(round(b_w * scale)))
+            new_h = max(1, int(round(b_h * scale)))
 
-        # 水印图本质是二值图，resize 必须用最近邻插值，
-        # 避免 LANCZOS 在边缘产生灰度过渡像素或文字内部空洞。
-        wm = wm.resize((new_w, new_h), Image.Resampling.NEAREST)
-        wm_gray = np.array(wm, dtype=np.float64)
+            # 水印图本质是二值图，resize 必须用最近邻插值，
+            # 避免 LANCZOS 在边缘产生灰度过渡像素或文字内部空洞。
+            wm = wm.resize((new_w, new_h), Image.Resampling.NEAREST)
+            wm_gray = np.array(wm, dtype=np.float64)
 
-        # 二值化：只区分黑/非黑
-        return _binarize_watermark(wm_gray)
+            # 二值化：只区分黑/非黑
+            return _binarize_watermark(wm_gray)
 
     def _preview_watermark_arrays(
         self,
@@ -441,11 +469,12 @@ class FFTWatermarkProcessor:
             mask = self._get_mask(scale_frontend, freq_frontend)
 
         # 并行计算 R/G/B 三个通道
-        futures = [
-            self._executor.submit(self._preview_channel, c, mask, power)
-            for c in range(3)
-        ]
-        results = [f.result() for f in futures]
+        with _timed("preview_watermark_parallel_rgb"):
+            futures = [
+                self._executor.submit(self._preview_channel, c, mask, power)
+                for c in range(3)
+            ]
+            results = [f.result() for f in futures]
 
         return {"r": results[0], "g": results[1], "b": results[2]}
 
@@ -537,7 +566,8 @@ class FFTWatermarkProcessor:
 
         # sign 涉及 IFFT，测试发现外部并行反而更慢（线程调度开销 > 收益）
         # 因此保持串行，依赖 numpy 内部优化
-        signed_channels = [self._sign_channel(c, mask, power) for c in range(3)]
+        with _timed("sign_all_channels"):
+            signed_channels = [self._sign_channel(c, mask, power) for c in range(3)]
 
         signed_img = np.stack(signed_channels, axis=2)  # H x W x 3
         # 本地服务优先响应速度，签名图也使用无压缩 PNG

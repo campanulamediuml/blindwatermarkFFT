@@ -46,6 +46,9 @@
     const resultPlaceholder = document.getElementById('result-placeholder');
     const previewSignImage = document.getElementById('preview-sign-image');
     const previewSignPlaceholder = document.getElementById('preview-sign-placeholder');
+    const previewSignLoading = document.getElementById('preview-sign-loading');
+    const gridLoading = document.getElementById('grid-loading');
+    const gridTable = document.querySelector('.spectrum-grid');
 
     // 图片放大模态框
     const imageModal = document.getElementById('image-modal');
@@ -120,6 +123,22 @@
     }
 
     /**
+     * 显示 3×3 频域分析表加载动画，并隐藏表格本身。
+     */
+    function showGridLoading() {
+        gridLoading.style.display = 'block';
+        gridTable.style.display = 'none';
+    }
+
+    /**
+     * 隐藏 3×3 频域分析表加载动画，并显示表格本身。
+     */
+    function hideGridLoading() {
+        gridLoading.style.display = 'none';
+        gridTable.style.display = '';
+    }
+
+    /**
      * 填充 3×3 网格。
      */
     function fillGrid(result) {
@@ -176,6 +195,7 @@
     function clearPreviewSign() {
         previewSignImage.src = '';
         previewSignImage.style.display = 'none';
+        previewSignLoading.style.display = 'none';
         previewSignPlaceholder.style.display = 'block';
     }
 
@@ -184,6 +204,7 @@
      */
     function updatePreviewSign(src) {
         previewSignPlaceholder.style.display = 'none';
+        previewSignLoading.style.display = 'none';
         showImage(previewSignImage, src);
     }
 
@@ -226,6 +247,18 @@
         clearResult();
         clearPreviewSign();
 
+        // 原图立刻本地展示，无需等待服务端返回
+        const localObjectUrl = URL.createObjectURL(file);
+        originalPlaceholder.style.display = 'none';
+        showImage(originalPreview, localObjectUrl);
+
+        // 签名预览区域也先展示原图，让用户有即时反馈
+        updatePreviewSign(localObjectUrl);
+
+        // 3×3 频域分析表进入加载状态
+        hideGridImages();
+        showGridLoading();
+
         const formData = new FormData();
         formData.append('image', file);
 
@@ -237,21 +270,19 @@
                 }
                 sessionId = result.session_id;
                 analyzeResult = result.analyze;
-                hideGridImages();
 
-                // 显示原图
-                originalPlaceholder.style.display = 'none';
+                // 服务端分析完成后，替换为更准确的分析结果原图（尺寸等一致）
                 showImage(originalPreview, result.analyze.original);
-
-                // 签名预览默认显示原图
                 updatePreviewSign(result.analyze.original);
 
                 // 填充 3×3 表
+                hideGridLoading();
                 fillGrid(result.analyze);
 
                 updateControls();
             })
             .catch(err => {
+                hideGridLoading();
                 alert('原图分析失败：' + err.message);
                 console.error(err);
             });
@@ -286,6 +317,7 @@
                     throw new Error(result.error);
                 }
                 previewWatermark();
+                previewSignedImage();
                 updateControls();
             })
             .catch(err => {
@@ -347,8 +379,6 @@
                 });
             });
 
-        // 同时更新签名预览
-        previewSignedImage();
     }
 
     /**
@@ -373,8 +403,10 @@
         }
         previewSignAbortController = new AbortController();
 
-        // 签名预览加载中
-        setLoading(previewSignImage, true);
+        // 显示“少女祈祷中”加载动画
+        previewSignPlaceholder.style.display = 'none';
+        previewSignImage.style.display = 'none';
+        previewSignLoading.style.display = 'block';
 
         const formData = new FormData();
         formData.append('session_id', sessionId);
@@ -393,11 +425,11 @@
                     console.log('[previewSignedImage] request aborted');
                     return;
                 }
+                // 出错时恢复占位提示
+                previewSignLoading.style.display = 'none';
+                previewSignPlaceholder.style.display = 'block';
                 console.error('签名预览失败：' + err.message);
                 console.error(err);
-            })
-            .finally(() => {
-                setLoading(previewSignImage, false);
             });
     }
 
@@ -459,29 +491,53 @@
         }
     });
 
-    // 滑动条值改变时直接触发预览（滑动条是离散的，无需节流）
-    function onControlChanged() {
+    // 滑动条拖动时实时预览幅度谱（fft 叠图快），松开鼠标后才预览签名（ifft 较慢）
+    function onPreviewControlChanged() {
         if (sessionId && fileB) {
             previewWatermark();
+        }
+    }
+
+    function onSignControlChanged() {
+        if (sessionId && fileB) {
+            previewSignedImage();
         }
     }
 
     scaleSlider.addEventListener('input', (e) => {
         currentScale = parseInt(e.target.value, 10);
         scaleValue.textContent = currentScale;
-        onControlChanged();
+        onPreviewControlChanged();
+    });
+
+    scaleSlider.addEventListener('change', (e) => {
+        currentScale = parseInt(e.target.value, 10);
+        scaleValue.textContent = currentScale;
+        onSignControlChanged();
     });
 
     powerSlider.addEventListener('input', (e) => {
         currentPower = parseInt(e.target.value, 10);
         powerValue.textContent = currentPower;
-        onControlChanged();
+        onPreviewControlChanged();
+    });
+
+    powerSlider.addEventListener('change', (e) => {
+        currentPower = parseInt(e.target.value, 10);
+        powerValue.textContent = currentPower;
+        onSignControlChanged();
     });
 
     freqSlider.addEventListener('input', (e) => {
         currentFreq = parseInt(e.target.value, 10);
         freqValue.textContent = currentFreq;
-        onControlChanged();
+        onPreviewControlChanged();
+    });
+
+    freqSlider.addEventListener('change', (e) => {
+        currentFreq = parseInt(e.target.value, 10);
+        freqValue.textContent = currentFreq;
+        onSignControlChanged();
     });
 
     signBtn.addEventListener('click', signImage);

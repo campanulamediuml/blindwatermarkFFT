@@ -209,6 +209,33 @@
         .modal-close:hover {
             color: #ccc;
         }
+
+        /* 签名预览加载动画 */
+        .loading-animation {
+            text-align: center;
+            color: #666;
+            padding: 40px 0;
+            display: none;
+        }
+        .loading-animation .spinner,
+        .grid-loading .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #ddd;
+            border-top-color: #4a90d9;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        .grid-loading {
+            text-align: center;
+            color: #666;
+            padding: 60px 0;
+            display: none;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -257,6 +284,10 @@
             <div class="preview-col">
                 <h4>签名预览（IFFT 结果）</h4>
                 <div class="placeholder" id="preview-sign-placeholder">上传原图和水印后可实时预览签名效果</div>
+                <div class="loading-animation" id="preview-sign-loading">
+                    <div class="spinner"></div>
+                    <p>少女祈祷中...</p>
+                </div>
                 <img id="preview-sign-image" alt="签名预览">
             </div>
         </div>
@@ -264,6 +295,10 @@
 
     <div class="grid-section">
         <h3>3×3 频域分析表</h3>
+        <div class="grid-loading" id="grid-loading">
+            <div class="spinner"></div>
+            <p>少女祈祷中...</p>
+        </div>
         <table class="spectrum-grid">
             <thead>
                 <tr>
@@ -308,6 +343,6 @@
         <img id="modal-image" class="modal-image" alt="放大查看">
     </div>
 
-    <script src="/static/app.js?v=16"></script>
+    <script src="/static/app.js?v=18"></script>
 </body>
 </html>

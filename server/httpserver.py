@@ -12,11 +12,16 @@ import signal
 import time
 import base64
 import uuid
+import argparse
+import logging
 from typing import Dict, Tuple
+
+import psutil
 
 import tornado.ioloop
 import tornado.web
 import tornado.httpserver
+from tornado.log import enable_pretty_logging
 
 from server.image_processor import FFTWatermarkProcessor
 from server.logger import AppLogger
@@ -581,13 +586,37 @@ def make_app() -> tornado.web.Application:
     )
 
 
-def main(port):
-    """启动 HTTP 服务。"""
+def main():
+    """启动 HTTP 服务。支持命令行参数：--port、--log-level 等。"""
+    parser = argparse.ArgumentParser(description="FFT 水印工具 HTTP 服务")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=30311,
+        help="监听端口（默认 30311）",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="info",
+        choices=["debug", "info", "warning", "error", "critical"],
+        help="日志级别（默认 info）",
+    )
+    args = parser.parse_args()
+
+    # 配置根日志级别
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    # 启用 Tornado 的彩色访问日志，每个 HTTP 请求都会打印
+    enable_pretty_logging()
+
     app = make_app()
 
     # 显式创建 HTTPServer，方便在收到退出信号时优雅关闭
     server = tornado.httpserver.HTTPServer(app)
-    server.listen(port)
+    server.listen(args.port)
 
     io_loop = tornado.ioloop.IOLoop.current()
 
@@ -611,11 +640,24 @@ def main(port):
     cleanup_callback = tornado.ioloop.PeriodicCallback(_cleanup_sessions, 600000)
     cleanup_callback.start()
 
-    print(f"FFT Watermark server is running at http://localhost:{port}/")
+    # 启动内存监控定时器（每 10 秒打印一次当前进程内存占用，单位 MB）
+    def _log_memory():
+        pid = os.getpid()
+        proc = psutil.Process(pid)
+        mem = proc.memory_info()
+        print(
+            f"[Memory] PID {pid} | RSS {mem.rss / 1024 / 1024:.2f} MB | "
+            f"VMS {mem.vms / 1024 / 1024:.2f} MB"
+        )
+
+    memory_callback = tornado.ioloop.PeriodicCallback(_log_memory, 10000)
+    memory_callback.start()
+
+    print(f"FFT Watermark server is running at http://localhost:{args.port}/")
     print("Press Ctrl+C to stop.")
     io_loop.start()
     print("Server stopped.")
 
 
 if __name__ == "__main__":
-    main(30312)
+    main()
