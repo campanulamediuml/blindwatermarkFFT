@@ -81,6 +81,7 @@
 
     /**
      * 通用的文件 POST 请求。
+     * 如果后端返回会话过期错误，自动提示并刷新页面。
      */
     function postFile(url, formData, signal, asJson = true) {
         const options = {
@@ -93,7 +94,25 @@
         return fetch(url, options).then(response => {
             if (!response.ok) {
                 return response.text().then(text => {
-                    throw new Error(`请求失败：${response.status} ${text}`);
+                    let errorMessage = `请求失败：${response.status} ${text}`;
+                    try {
+                        const errJson = JSON.parse(text);
+                        if (errJson.error) {
+                            errorMessage = errJson.error;
+                        }
+                    } catch (e) {
+                        // 非 JSON 错误响应，保留原始文本
+                    }
+
+                    // 会话过期时自动提示并刷新页面
+                    if (errorMessage.includes('会话不存在或已过期')) {
+                        alert('会话已过期，页面将自动刷新，请重新上传图片。');
+                        location.reload();
+                        // 返回永远 pending 的 Promise，阻止后续 then/catch 执行
+                        return new Promise(() => {});
+                    }
+
+                    throw new Error(errorMessage);
                 });
             }
             if (asJson) {
